@@ -6,6 +6,7 @@ const cors = require("cors");
 const aedes = require("aedes");
 const net = require("net");
 const mqtt = require("mqtt");
+const tcpPortUsed = require("tcp-port-used");
 const Lambda = require("serverless-offline/dist/lambda").default;
 
 class ServerlessOfflineAwsEventbridgePlugin {
@@ -40,8 +41,7 @@ class ServerlessOfflineAwsEventbridgePlugin {
   }
 
   async start() {
-    this.log("start");
-    this.init();
+    await this.init();
 
     if (this.mockEventBridgeServer) {
       // Start Express Server
@@ -51,25 +51,24 @@ class ServerlessOfflineAwsEventbridgePlugin {
 
   async stop() {
     this.init();
-    this.log("stop");
     this.eventBridgeServer.close();
     if (this.lambda) await this.lambda.cleanup();
   }
 
-  init() {
+  async init() {
     this.config =
       this.serverless.service.custom["serverless-offline-aws-eventbridge"] ||
       {};
-    this.port = this.config.port || 4010;
+    this.port = this.config.port || 5010;
     this.mockEventBridgeServer =
       "mockEventBridgeServer" in this.config
         ? this.config.mockEventBridgeServer
         : true;
     this.hostname = this.config.hostname || "127.0.0.1";
-    this.pubSubPort = this.config.pubSubPort || 4011;
+    this.pubSubPort = this.config.pubSubPort || 5011;
     this.account = this.config.account || "";
     this.region = this.serverless.service.provider.region || "us-east-1";
-    this.debug = this.config.debug || false;
+    this.debug = this.config.debug || true;
     this.importedEventBuses = this.config["imported-event-buses"] || {};
     this.payloadSizeLimit = this.config.payloadSizeLimit || "10mb";
 
@@ -77,14 +76,21 @@ class ServerlessOfflineAwsEventbridgePlugin {
       service: { custom = {}, provider },
     } = this.serverless;
 
-    // If the stack receives EventBridge events, start the MQ broker as well
     if (this.mockEventBridgeServer) {
-      this.mqServer = net.createServer(aedes().handle);
-      this.mqServer.listen(this.pubSubPort, () => {
+      const inUse = await tcpPortUsed.check(this.pubSubPort);
+      if (inUse) {
         this.log(
-          `MQTT Broker started and listening on port ${this.pubSubPort}`
+          `MQTT Broker already started by another stack on port ${this.pubSubPort}`
         );
-      });
+        this.mockEventBridgeServer = false;
+      } else {
+        this.mqServer = net.createServer(aedes().handle);
+        this.mqServer.listen(this.pubSubPort, () => {
+          this.log(
+            `MQTT Broker started and listening on port ${this.pubSubPort}`
+          );
+        });
+      }
     }
 
     // Connect to the MQ server for any lambdas listening to EventBridge events
@@ -219,7 +225,6 @@ class ServerlessOfflineAwsEventbridgePlugin {
 
   invokeSubscribers(entries) {
     if (!entries) return [];
-    this.log("checking event subscribers");
 
     const invoked = [];
 
@@ -319,9 +324,6 @@ class ServerlessOfflineAwsEventbridgePlugin {
     }
 
     const subscribed = subscribedChecks.every((x) => x);
-    this.log(
-      `${subscriber.functionKey} ${subscribed ? "is" : "is not"} subscribed`
-    );
     return subscribed;
   }
 
